@@ -1,75 +1,69 @@
 import argparse
-from tqdm import tqdm
 import mysql.connector
+from tqdm import tqdm
+import sys
 
 
-def search_all_tables(host, user, password, database, search_value, stop_on_find, show_progress, ignore_tables,
-                      like_search):
-    """
-    Searches all tables in a MySQL database for a given value.
+def main(args):
+    host = args.host
+    user = args.user
+    password = args.password
+    database = args.database
+    search_value = args.search_value
+    column_timeout = args.column_timeout
+    table_timeout = args.table_timeout
+    ignore_tables = args.ignore_tables.split(',')
 
-    :param host: MySQL server hostname
-    :param user: MySQL user
-    :param password: MySQL password
-    :param database: MySQL database name
-    :param search_value: value to search for
-    :param stop_on_find: whether to stop searching after the first match
-    :param show_progress: whether to show a progress bar
-    :param ignore_tables: a list of tables to ignore
-    :param like_search: whether to use partial matching (LIKE)
-    """
+    # Add your database connection details here
     connection = mysql.connector.connect(host=host, user=user, password=password, database=database)
     cursor = connection.cursor()
 
-    cursor.execute("SHOW TABLES")
-    tables = [row[0] for row in cursor.fetchall()]
-    tables = [t for t in tables if t not in ignore_tables]
+    cursor.execute("SET SESSION max_execution_time = %s;", (table_timeout,))
+    cursor.fetchall()
 
-    progress = tqdm(tables, desc="Scanning", unit="tables", disable=not show_progress)
+    cursor.execute("SHOW TABLES;")
+    tables = [table[0] for table in cursor.fetchall() if table[0] not in ignore_tables]
 
-    for table_name in progress:
-        cursor.execute(
-            f"SELECT * FROM information_schema.columns WHERE table_schema = '{database}' AND table_name = '{table_name}'")
-        columns = [row[3] for row in cursor.fetchall()]
+    for table_name in tqdm(tables, desc="Scanning", unit="table"):
+        cursor.execute("SET SESSION max_execution_time = %s;", (column_timeout,))
+        cursor.fetchall()
+
+        cursor.execute(f"SHOW COLUMNS FROM {table_name};")
+        columns = [column[0] for column in cursor.fetchall()]
 
         for column_name in columns:
-            if like_search:
-                query = f"SELECT * FROM `{table_name}` WHERE `{column_name}` LIKE %s LIMIT 1"
-            else:
-                query = f"SELECT * FROM `{table_name}` WHERE `{column_name}` = %s LIMIT 1"
-
             try:
+                if args.use_like:
+                    query = f"SELECT * FROM {table_name} WHERE {column_name} LIKE %s;"
+                else:
+                    query = f"SELECT * FROM {table_name} WHERE {column_name} = %s;"
+
                 cursor.execute(query, (search_value,))
-                if cursor.fetchone() is not None:
-                    tqdm.write(f"Match found in table '{table_name}', column '{column_name}'")
-                    if stop_on_find:
-                        return
-            except mysql.connector.Error as e:
+                result = cursor.fetchall()
+                if result:
+                    tqdm.write(f"Found in table '{table_name}', column '{column_name}': {result}")
+                    if args.stop_when_found:
+                        sys.exit(0)
+
+            except mysql.connector.errors.Error as e:
                 tqdm.write(f"Error scanning {table_name}.{column_name}: {str(e)}")
 
-    cursor.close()
     connection.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Search for a value across all tables and columns in a MySQL database.")
-    parser.add_argument("host", help="MySQL server host")
-    parser.add_argument("user", help="MySQL user")
-    parser.add_argument("password", help="MySQL password")
-    parser.add_argument("database", help="MySQL database")
-    parser.add_argument("search_value", help="Value to search for")
-    parser.add_argument("-s", "--stop-on-find", action="store_true", help="Stop searching when a match is found")
-    parser.add_argument("-p", "--hide-progress", action="store_true", help="Hide progress bar")
-    parser.add_argument("-i", "--ignore-tables", nargs="*", default=[],
-                        help="Ignore specific tables during the search")
-    parser.add_argument("-l", "--like-search", action="store_true", help="Use LIKE instead of exact match")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Scan MySQL database for a value.")
+    parser.add_argument("host", help="Host of the MySQL server.")
+    parser.add_argument("user", help="Username for the MySQL server.")
+    parser.add_argument("password", help="Password for the MySQL server.")
+    parser.add_argument("database", help="Name of the database to search.")
+    parser.add_argument("search_value", help="Value to search for.")
+    parser.add_argument("--stop-when-found", action="store_true", help="Stop searching when the value is found.")
+    parser.add_argument("--column-timeout", type=int, default=60, help="Timeout for each column search in seconds.")
+    parser.add_argument("--table-timeout", type=int, default=60, help="Timeout for each table search in seconds.")
+    parser.add_argument("--ignore-tables", default="", help="Comma-separated list of tables to ignore.")
+    parser.add_argument("--use-like", action="store_true", help="Use LIKE instead of exact match.")
 
     args = parser.parse_args()
 
-    search_all_tables(args.host, args.user, args.password, args.database, args.search_value, args.stop_on_find,
-                      not args.hide_progress, args.ignore_tables, args.like_search)
-
-
-if __name__ == "__main__":
-    main()
+    main(args)
